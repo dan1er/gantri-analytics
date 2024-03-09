@@ -1,0 +1,240 @@
+async function fetchOrdersByDate(startDate, endDate) {
+  const baseURL =
+    "https://thoughtmetric.io/organizations/2385/projects/3152/metrics/all_orders";
+
+  const startTimestampPST = `${startDate}T00:00:00-08:00`;
+  const endTimestampPST = `${endDate || startDate}T23:59:59-08:00`;
+
+  const url = `${baseURL}?startDate="${startTimestampPST}"&endDate="${endTimestampPST}"&channel=all&startRow=0&endRow=1500`;
+
+  try {
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    const data = await response.json();
+    const orderIds = data.orders.map((order) => order.transaction_id);
+    console.log("Orders", orderIds);
+    console.log("Orders Count", orderIds.length);
+
+    const converstionIds = data.orders.map((order) => ({
+      conversionId: order.conversion_id,
+      transactionId: order.transaction_id,
+    }));
+
+    const details = await fetchOrderDetails(converstionIds);
+
+    console.table(details);
+  } catch (error) {
+    console.error("Failed to fetch orders:", error);
+  }
+}
+
+async function fetchOrderDetails(transactionIds) {
+  const report = [];
+  let totals = {
+    subtotal: 0,
+    discount: 0,
+    shipping: 0,
+    tax: 0,
+    total: 0,
+    gantriSubtotal: 0,
+    gantriDiscount: 0,
+    gantriShipping: 0,
+    gantriTax: 0,
+    gantriTotal: 0,
+  };
+
+  let gantriUserToken = localStorage.getItem("GANTRI_REPORT_TOKEN");
+
+  if (!gantriUserToken) {
+    const token = prompt("Enter a valid gantri auth token", "");
+
+    if (token) {
+      gantriUserToken = token.startsWith("Bearer ") ? token : `Bearer ${token}`;
+      localStorage.setItem("GANTRI_REPORT_TOKEN", gantriUserToken);
+    }
+  }
+
+  console.log("Fetching orders");
+
+  for (const { conversionId, transactionId } of transactionIds) {
+    const order = await fetchThoughtMetricOrder(conversionId);
+    let gantriOrder = null;
+
+    if (gantriUserToken) {
+      gantriOrder = await fetchGantriOrder(transactionId, gantriUserToken);
+    }
+
+    const subtotal = Number(order.subtotal_price.toFixed(2));
+    const gantriSubtotal = gantriOrder
+      ? Number((gantriOrder.amount.subtotal / 100).toFixed(2))
+      : 0;
+    const discount = Number(order.total_discounts.toFixed(2));
+    const gantriDiscount = gantriOrder
+      ? Number(
+          (
+            (gantriOrder.amount.credit || gantriOrder.amount.gift) / 100
+          ).toFixed(2)
+        )
+      : 0;
+    const shipping = Number(order.total_shipping.toFixed(2));
+    const gantriShipping = gantriOrder
+      ? Number((gantriOrder.amount.shipping / 100).toFixed(2))
+      : 0;
+    const tax = Number(order.total_tax.toFixed(2));
+    const gantriTax = gantriOrder
+      ? Number((gantriOrder.amount.tax / 100).toFixed(2))
+      : 0;
+    const total = Number((subtotal + shipping + tax - discount).toFixed(2));
+    const gantriTotal = gantriOrder
+      ? Number((gantriOrder.amount.total / 100).toFixed(2))
+      : 0;
+
+    const orderReport = {
+      orderId: order.transaction_id,
+      subtotal,
+      gantriSubtotal,
+      discount,
+      gantriDiscount,
+      shipping,
+      gantriShipping,
+      tax,
+      gantriTax,
+      total,
+      gantriTotal,
+    };
+
+    // Update totals
+    totals.subtotal += subtotal;
+    totals.discount += discount;
+    totals.shipping += shipping;
+    totals.tax += tax;
+    totals.total += total;
+    totals.gantriSubtotal += gantriSubtotal;
+    totals.gantriDiscount += gantriDiscount;
+    totals.gantriShipping += gantriShipping;
+    totals.gantriTax += gantriTax;
+    totals.gantriTotal += gantriTotal;
+
+    report.push(orderReport);
+  }
+
+  console.log("Orders fetched");
+
+  Object.keys(totals).forEach((key) => {
+    totals[key] = Number(totals[key].toFixed(2));
+  });
+
+  report.push({
+    orderId: "Totals",
+    ...totals,
+  });
+
+  return report;
+}
+
+async function fetchThoughtMetricOrder(transactionId) {
+  const baseURL =
+    "https://thoughtmetric.io/organizations/2385/projects/3152/metrics/order";
+
+  const url = `${baseURL}?order_id=${transactionId}`;
+
+  try {
+    const response = await fetch(url);
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    const data = await response.json();
+    const order = data.order;
+
+    return order;
+  } catch (error) {
+    console.error(
+      `Failed to fetch details for transaction ID ${transactionId}:`,
+      error
+    );
+  }
+}
+
+async function fetchGantriOrder(transactionId, gantriUserToken) {
+  try {
+    const response = await fetch(
+      `https://api.gantri.com/api/admin/transactions/${transactionId}`,
+      {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: gantriUserToken,
+        },
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    const data = await response.json();
+    const order = data.order;
+
+    return order;
+  } catch (error) {
+    console.error(
+      `Failed to fetch details for gantri order ID ${transactionId}:`,
+      error
+    );
+  }
+}
+
+async function fetchGantriTransactions(startDate, endDate) {
+  const url = "https://api.gantri.com/api/admin/paginated-transactions";
+  const gantriUserToken = localStorage.getItem("GANTRI_REPORT_TOKEN");
+
+  const payload = {
+    action: false,
+    color: null,
+    late: false,
+    productId: null,
+    size: null,
+    statuses: [],
+    types: ["Order"],
+    search: "",
+    sortingField: "createdAt",
+    sortingType: "DESC",
+    count: 100,
+    page: 1,
+    completedEndDate: null,
+    completedEndDateSec: null,
+    completedStartDate: null,
+    completedStartDateSec: null,
+    endDate: endDate,
+    endDateSec: new Date(endDate).getTime(),
+    startDate: startDate,
+    startDateSec: new Date(startDate).getTime(),
+  };
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: gantriUserToken,
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    const data = await response.json();
+    console.log(
+      "Gantri Orders",
+      data.orders.map((order) => order.id)
+    );
+  } catch (error) {
+    console.error("Failed to fetch Gantri transactions:", error);
+  }
+}
